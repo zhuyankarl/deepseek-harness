@@ -623,7 +623,12 @@ class AppConfig
     public static AppConfig Load(string exeDir)
     {
         var cfg = new AppConfig();
-        cfg.Path = System.IO.Path.Combine(exeDir, "dsh-manager.ini");
+        string exeSide = System.IO.Path.Combine(exeDir, "dsh-manager.ini");
+        string appdata = System.IO.Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "dsh-manager", "dsh-manager.ini");
+        // Portable override first; otherwise a per-user config outside the exe folder.
+        cfg.Path = File.Exists(exeSide) ? exeSide : appdata;
         try
         {
             if (File.Exists(cfg.Path))
@@ -650,6 +655,8 @@ class AppConfig
     {
         try
         {
+            string dir = System.IO.Path.GetDirectoryName(Path);
+            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
             var sb = new StringBuilder();
             sb.AppendLine("# dsh-manager configuration");
             sb.AppendLine("repo=" + Repo);

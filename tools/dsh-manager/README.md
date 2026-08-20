@@ -18,7 +18,7 @@ Commands prefer `corepack pnpm` and fall back to a bare `pnpm` when corepack is 
 
 ## Configuration
 
-`dsh-manager.ini` next to the executable, UTF-8, `key=value` lines:
+`dsh-manager.ini`, UTF-8, `key=value` lines. The manager reads an ini next to the executable when present (portable mode); otherwise it uses `%APPDATA%\dsh-manager\dsh-manager.ini`, so the executable folder stays clean.
 
 ```ini
 # dsh-manager configuration

@@ -18,7 +18,7 @@ DeepSeek Harness `dsh web` 服务的 Windows 桌面启动器：在一个窗口�
 
 ## 配置
 
-可执行文件旁的 `dsh-manager.ini`，UTF-8 编码，`key=value` 格式：
+`dsh-manager.ini`，UTF-8 编码，`key=value` 格式。管理器优先读取可执行文件旁的 ini（便携模式）；不存在时使用 `%APPDATA%\dsh-manager\dsh-manager.ini`，使可执行文件所在目录保持整洁。
 
 ```ini
 # dsh-manager configuration
