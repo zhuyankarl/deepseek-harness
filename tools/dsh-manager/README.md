@@ -14,7 +14,7 @@ The UI strings are Chinese. The repository gates do not build or test this tool;
 | 启动服务 (Start) | Reuse the running service and open the browser, or start it when stopped, then wait for readiness and open the browser. Never kills a running service. |
 | 关闭服务 (Stop) | Stop the running `dsh web` processes (the `corepack pnpm dsh web` wrapper, the `node --import tsx/esm apps/cli/src/bin.ts web` server, and the `cmd.exe` wrappers that own log redirection). |
 
-Commands prefer `corepack pnpm` and fall back to a bare `pnpm` when corepack is missing. The service runs detached, so closing the manager does not stop it.
+Commands prefer `corepack pnpm` and fall back to a bare `pnpm` when corepack is missing; the service is started with `--no-open` so the manager alone decides when to open the browser. The service runs detached, so closing the manager does not stop it.
 
 ## Configuration
 

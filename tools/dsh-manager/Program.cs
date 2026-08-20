@@ -138,6 +138,7 @@ public class DshManager : Form
         };
         btnStop.Click += (s, e) => { if (busy) return; new Thread(StopFlow) { IsBackground = true }.Start(); };
         FormClosing += OnClosing;
+        Activated += (s, e) => RefreshRuntimeStatus();
 
         Log("配置文件: " + cfg.Path);
         Log("日志目录: " + LogDir());
@@ -190,6 +191,28 @@ public class DshManager : Form
         cfg.Repo = txtRepo.Text.Trim();
         cfg.Port = ReadPort();
         cfg.Save();
+    }
+
+    /* 窗口激活时快速复查服务状态，自动纠正误报的“启动异常” */
+    void RefreshRuntimeStatus()
+    {
+        if (busy) return;
+        try
+        {
+            if (!IsDshRunning()) return;
+            var req = (HttpWebRequest)WebRequest.Create(BaseUrl());
+            req.Timeout = 2000;
+            req.Method = "GET";
+            using (var resp = (HttpWebResponse)req.GetResponse())
+            {
+                if ((int)resp.StatusCode < 400 && lblStatus.Text != "服务运行中")
+                {
+                    Log("复查：服务已就绪");
+                    SetStatus("服务运行中", Color.FromArgb(21, 115, 71));
+                }
+            }
+        }
+        catch { }
     }
 
     /* ---------- 仓库探测 ---------- */
@@ -386,8 +409,8 @@ public class DshManager : Form
         Directory.CreateDirectory(logDir);
         string outLog = Path.Combine(logDir, "dsh-web-out.log");
         string errLog = Path.Combine(logDir, "dsh-web-err.log");
-        // Prefer corepack; fall back to a bare pnpm when corepack is missing.
-        string cmd = "(corepack pnpm dsh web || pnpm dsh web) >> \"" + outLog + "\" 2>> \"" + errLog + "\"";
+        // Prefer corepack; fall back to a bare pnpm. --no-open lets this manager own the browser step.
+        string cmd = "(corepack pnpm dsh web --no-open || pnpm dsh web --no-open) >> \"" + outLog + "\" 2>> \"" + errLog + "\"";
         var psi = new ProcessStartInfo("cmd.exe", "/c " + cmd)
         {
             WorkingDirectory = repo,
@@ -488,11 +511,17 @@ public class DshManager : Form
             Log("启动服务...");
             StartService(repo);
 
-            bool ready = WaitForServerReady(30);
+            bool ready = WaitForServerReady(60);
+            if (!ready && IsDshRunning())
+            {
+                Log("进程已启动但页面尚未就绪，继续等待 90 秒...");
+                SetStatus("服务启动中...", Color.FromArgb(176, 116, 0));
+                ready = WaitForServerReady(90);
+            }
             if (ready || IsDshRunning())
             {
                 if (ready) { Log("服务已就绪: " + BaseUrl()); SetStatus("服务运行中", Color.FromArgb(21, 115, 71)); OpenBrowser(); }
-                else { Log("进程已启动但页面未就绪，请查看日志目录"); SetStatus("启动异常", Color.Firebrick); }
+                else { Log("启动超时：进程存活但页面未就绪，请查看日志目录"); SetStatus("启动异常", Color.Firebrick); }
             }
             else
             {
@@ -523,11 +552,17 @@ public class DshManager : Form
                 return;
             }
             StartService(repo);
-            bool ready = WaitForServerReady(30);
+            bool ready = WaitForServerReady(60);
+            if (!ready && IsDshRunning())
+            {
+                Log("进程已启动但页面尚未就绪，继续等待 90 秒...");
+                SetStatus("服务启动中...", Color.FromArgb(176, 116, 0));
+                ready = WaitForServerReady(90);
+            }
             if (ready || IsDshRunning())
             {
                 if (ready) { Log("服务已就绪: " + BaseUrl()); SetStatus("服务运行中", Color.FromArgb(21, 115, 71)); OpenBrowser(); }
-                else { Log("进程已启动但页面未就绪，请查看日志目录"); SetStatus("启动异常", Color.Firebrick); }
+                else { Log("启动超时：进程存活但页面未就绪，请查看日志目录"); SetStatus("启动异常", Color.Firebrick); }
             }
             else
             {

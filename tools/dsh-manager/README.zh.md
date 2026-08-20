@@ -14,7 +14,7 @@ DeepSeek Harness `dsh web` 服务的 Windows 桌面启动器：在一个窗口�
 | 启动服务 | 服务已在运行则直接打开浏览器；未运行则启动，等待就绪后打开浏览器。绝不会关闭正在运行的服务。 |
 | 关闭服务 | 停止正在运行的 `dsh web` 进程（`corepack pnpm dsh web` 包装进程、`node --import tsx/esm apps/cli/src/bin.ts web` 服务进程，以及持有日志重定向的 `cmd.exe` 包装进程）。 |
 
-命令优先使用 `corepack pnpm`，corepack 不可用时回退到裸 `pnpm`。服务以独立进程启动，关闭管理器不影响服务。
+命令优先使用 `corepack pnpm`，corepack 不可用时回退到裸 `pnpm`；服务以 `--no-open` 启动，何时打开浏览器由管理器统一决定。服务以独立进程启动，关闭管理器不影响服务。
 
 ## 配置
 
