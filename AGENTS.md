@@ -52,6 +52,7 @@ examples/    Runnable cordis.yml leaves over packages/examples bundles (see exam
 .agents/     Agent workflows and Agent Notes (`notes/`)
 docs/        architecture, generated catalogs, postmortems, cookbook (see docs/AGENTS.md)
 scripts/     repo gates and generators
+tools/       developer utilities (dsh-manager Windows launcher)
 website/     VitePress projection of selected bilingual docs/ sources
 ```
 
