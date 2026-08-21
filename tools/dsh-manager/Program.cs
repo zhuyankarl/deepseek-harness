@@ -274,6 +274,18 @@ public class DshManager : Form
         txtLog.AppendText(s + Environment.NewLine);
         txtLog.SelectionStart = txtLog.TextLength;
         txtLog.ScrollToCaret();
+        try
+        {
+            string logDir = LogDir();
+            Directory.CreateDirectory(logDir);
+            File.AppendAllText(Path.Combine(logDir, "dsh-manager.log"),
+                "[" + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "] " + s + Environment.NewLine,
+                Encoding.UTF8);
+        }
+        catch
+        {
+            // The on-screen log remains available when the persistent log cannot be written.
+        }
     }
 
     void SetStatus(string s, Color? c = null)
@@ -410,7 +422,8 @@ public class DshManager : Form
         string outLog = Path.Combine(logDir, "dsh-web-out.log");
         string errLog = Path.Combine(logDir, "dsh-web-err.log");
         // Prefer corepack; fall back to a bare pnpm. --no-open lets this manager own the browser step.
-        string cmd = "(corepack pnpm dsh web --no-open || pnpm dsh web --no-open) >> \"" + outLog + "\" 2>> \"" + errLog + "\"";
+        string webArgs = "dsh web --no-open --port " + cfg.Port;
+        string cmd = "(corepack pnpm " + webArgs + " || pnpm " + webArgs + ") >> \"" + outLog + "\" 2>> \"" + errLog + "\"";
         var psi = new ProcessStartInfo("cmd.exe", "/c " + cmd)
         {
             WorkingDirectory = repo,
@@ -478,11 +491,13 @@ public class DshManager : Form
             if (behind > 0)
             {
                 SetStatus("拉取更新...");
-                if (RunCmd("git pull --ff-only", repo).Code != 0)
+                // 用 FETCH_HEAD 合并而不是 git pull：不依赖当前分支的 upstream 配置，
+                // 在 feat 分支、无 tracking 信息时也能更新，且复用上一步已 fetch 的提交。
+                if (RunCmd("git merge --ff-only FETCH_HEAD", repo).Code != 0)
                 {
-                    Log("快进失败，尝试普通 pull");
-                    if (RunCmd("git pull --no-rebase", repo).Code != 0)
-                    { Log("git pull 失败，中止"); SetStatus("pull 失败", Color.Firebrick); return; }
+                    Log("快进失败，尝试普通 merge");
+                    if (RunCmd("git merge --no-edit FETCH_HEAD", repo).Code != 0)
+                    { Log("git merge 失败，中止"); SetStatus("merge 失败", Color.Firebrick); return; }
                 }
                 Log("拉取完成，当前版本: " + ReadVersion(repo));
 
@@ -490,13 +505,9 @@ public class DshManager : Form
                 if (RunPnpm("install", repo).Code != 0)
                 { Log("依赖安装失败，中止"); SetStatus("install 失败", Color.Firebrick); return; }
 
-                SetStatus("构建库...");
-                if (RunPnpm("run build:lib", repo).Code != 0)
-                { Log("库构建失败，中止"); SetStatus("build:lib 失败", Color.Firebrick); return; }
-
-                SetStatus("构建 Web 前端...");
-                if (RunPnpm("--filter @deepseek-ai/dsh-web-frontend run build", repo).Code != 0)
-                { Log("前端构建失败，中止（保留现有服务）"); SetStatus("build:web 失败", Color.Firebrick); return; }
+                SetStatus("构建 DSH...");
+                if (RunPnpm("run build", repo).Code != 0)
+                { Log("完整构建失败，中止（保留现有服务）"); SetStatus("build 失败", Color.Firebrick); return; }
 
                 Log("构建完成");
             }
