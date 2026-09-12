@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Net;
@@ -200,16 +201,11 @@ public class DshManager : Form
         try
         {
             if (!IsDshRunning()) return;
-            var req = (HttpWebRequest)WebRequest.Create(BaseUrl());
-            req.Timeout = 2000;
-            req.Method = "GET";
-            using (var resp = (HttpWebResponse)req.GetResponse())
+            if (!ProbeServer(BaseUrl())) return;
+            if (lblStatus.Text != "服务运行中")
             {
-                if ((int)resp.StatusCode < 400 && lblStatus.Text != "服务运行中")
-                {
-                    Log("复查：服务已就绪");
-                    SetStatus("服务运行中", Color.FromArgb(21, 115, 71));
-                }
+                Log("复查：服务已就绪");
+                SetStatus("服务运行中", Color.FromArgb(21, 115, 71));
             }
         }
         catch { }
@@ -270,10 +266,18 @@ public class DshManager : Form
 
     void Log(string s)
     {
-        if (txtLog.InvokeRequired) { txtLog.BeginInvoke(new Action<string>(Log), s); return; }
-        txtLog.AppendText(s + Environment.NewLine);
-        txtLog.SelectionStart = txtLog.TextLength;
-        txtLog.ScrollToCaret();
+        try
+        {
+            if (txtLog.InvokeRequired) { txtLog.BeginInvoke(new Action<string>(Log), s); return; }
+            txtLog.AppendText(s + Environment.NewLine);
+            txtLog.SelectionStart = txtLog.TextLength;
+            txtLog.ScrollToCaret();
+        }
+        catch (ObjectDisposedException) { }
+        catch (InvalidOperationException) { }
+        // A background flow may still log after the user confirmed exit and the
+        // form was disposed; the on-screen log is gone but the persistent one
+        // below still records what happened (instead of crashing the process).
         try
         {
             string logDir = LogDir();
@@ -290,19 +294,29 @@ public class DshManager : Form
 
     void SetStatus(string s, Color? c = null)
     {
-        if (lblStatus.InvokeRequired) { lblStatus.BeginInvoke(new Action<string, Color?>(SetStatus), s, c); return; }
-        lblStatus.Text = s;
-        lblStatus.ForeColor = c ?? Color.FromArgb(91, 107, 133);
+        try
+        {
+            if (lblStatus.InvokeRequired) { lblStatus.BeginInvoke(new Action<string, Color?>(SetStatus), s, c); return; }
+            lblStatus.Text = s;
+            lblStatus.ForeColor = c ?? Color.FromArgb(91, 107, 133);
+        }
+        catch (ObjectDisposedException) { }
+        catch (InvalidOperationException) { }
     }
 
     void SetBusy(bool b)
     {
-        if (InvokeRequired) { BeginInvoke(new Action<bool>(SetBusy), b); return; }
-        busy = b;
-        btnUpdate.Enabled = !b;
-        btnStart.Enabled = !b;
-        btnStop.Enabled = !b;
-        if (b) SetStatus("执行中...");
+        try
+        {
+            if (InvokeRequired) { BeginInvoke(new Action<bool>(SetBusy), b); return; }
+            busy = b;
+            btnUpdate.Enabled = !b;
+            btnStart.Enabled = !b;
+            btnStop.Enabled = !b;
+            if (b) SetStatus("执行中...");
+        }
+        catch (ObjectDisposedException) { }
+        catch (InvalidOperationException) { }
     }
 
     /* ---------- 命令执行 ---------- */
@@ -374,45 +388,82 @@ public class DshManager : Form
 
     void KillDsh()
     {
-        int killed = 0;
-        try
+        const int MaxRounds = 3;
+        int total = 0;
+        var failedPids = new HashSet<int>();
+        for (int round = 0; round < MaxRounds; round++)
         {
-            using (var searcher = new ManagementObjectSearcher("SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name = 'node.exe'"))
+            int killed = 0;
+            try
             {
-                foreach (ManagementObject mo in searcher.Get())
+                // Kill the cmd.exe wrappers FIRST: StartService launches via
+                // `(corepack pnpm ... || pnpm ...)`, and cmd runs the right side
+                // whenever the left side dies non-zero — so a wrapper that
+                // outlives its node children re-spawns the very service we just
+                // killed (observed: one click left a re-spawned orphan behind
+                // and the user had to stop twice).
+                using (var searcher = new ManagementObjectSearcher("SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name = 'cmd.exe'"))
                 {
-                    if (!MatchNodeDsh((mo["CommandLine"] as string) ?? "")) continue;
-                    KillOne(mo, ref killed);
+                    foreach (ManagementObject mo in searcher.Get())
+                    {
+                        if (!CmdWrapper.IsMatch((mo["CommandLine"] as string) ?? "")) continue;
+                        if (KillOne(Convert.ToInt32((uint)mo["ProcessId"])) == KillOutcome.Killed) killed++;
+                    }
+                }
+                // The wrappers also own the service log redirection; killing them
+                // first releases the log files and removes the || respawn path.
+                using (var searcher = new ManagementObjectSearcher("SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name = 'node.exe'"))
+                {
+                    foreach (ManagementObject mo in searcher.Get())
+                    {
+                        if (!MatchNodeDsh((mo["CommandLine"] as string) ?? "")) continue;
+                        var outcome = KillOne(Convert.ToInt32((uint)mo["ProcessId"]));
+                        if (outcome == KillOutcome.Killed) killed++;
+                        else if (outcome == KillOutcome.Failed) failedPids.Add(Convert.ToInt32((uint)mo["ProcessId"]));
+                    }
                 }
             }
-            // cmd.exe wrappers own the service log redirection; stop them too so
-            // log files are released for cleanup.
-            using (var searcher = new ManagementObjectSearcher("SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name = 'cmd.exe'"))
-            {
-                foreach (ManagementObject mo in searcher.Get())
-                {
-                    if (!CmdWrapper.IsMatch((mo["CommandLine"] as string) ?? "")) continue;
-                    KillOne(mo, ref killed);
-                }
-            }
+            catch (Exception ex) { Log("进程枚举异常: " + ex.Message); }
+            total += killed;
+            // Dry round (nothing killed) means the tree is down — or every kill
+            // failed on permissions, which retrying in the same run never fixes.
+            if (killed == 0) break;
+            // Late spawns and WMI snapshot races can surface a process a moment
+            // after it was killed; re-scan after a grace pause instead of
+            // trusting a single enumeration.
+            Thread.Sleep(1500);
         }
-        catch (Exception ex) { Log("进程枚举异常: " + ex.Message); }
-        Log(killed == 0 ? "未发现运行中的 dsh web 进程" : "共停止 " + killed + " 个进程");
-        Thread.Sleep(2000);
+        if (total > 0) Log("共停止 " + total + " 个进程" + (failedPids.Count > 0 ? "，" + failedPids.Count + " 个停止失败（可能需要管理员权限）" : ""));
+        else if (failedPids.Count > 0) Log(failedPids.Count + " 个进程停止失败（可能需要管理员权限），服务仍在运行");
+        else Log("未发现运行中的 dsh web 进程");
+        Thread.Sleep(1000);
     }
 
-    void KillOne(ManagementObject mo, ref int killed)
+    /// <summary>Outcome of a single kill attempt.</summary>
+    enum KillOutcome { Killed, AlreadyGone, Failed }
+
+    /// <summary>Terminate one process by id; logs failures (e.g. an elevated
+    /// service this non-elevated manager cannot kill) instead of swallowing them.</summary>
+    KillOutcome KillOne(int pid)
     {
         try
         {
-            var pid = Convert.ToInt32((uint)mo["ProcessId"]);
             var pr = Process.GetProcessById(pid);
             pr.Kill();
             pr.WaitForExit(3000);
-            killed++;
             Log("已停止 PID " + pid);
+            return KillOutcome.Killed;
         }
-        catch { }
+        catch (ArgumentException)
+        {
+            // The process exited between enumeration and kill — nothing to do.
+            return KillOutcome.AlreadyGone;
+        }
+        catch (Exception ex)
+        {
+            Log("停止 PID " + pid + " 失败: " + ex.Message);
+            return KillOutcome.Failed;
+        }
     }
 
     void StartService(string repo)
@@ -443,20 +494,32 @@ public class DshManager : Form
         var sw = Stopwatch.StartNew();
         while (sw.Elapsed.TotalSeconds < timeoutSeconds)
         {
-            try
-            {
-                var req = (HttpWebRequest)WebRequest.Create(url);
-                req.Timeout = 2000;
-                req.Method = "GET";
-                using (var resp = (HttpWebResponse)req.GetResponse())
-                {
-                    if ((int)resp.StatusCode < 400) return true;
-                }
-            }
-            catch { }
+            if (ProbeServer(url)) return true;
             Thread.Sleep(1000);
         }
         return false;
+    }
+
+    /// <summary>True when the server answers at all — dsh 0.1.5+ replies 401
+    /// without a token, which still proves the server is up and listening.</summary>
+    internal static bool ProbeServer(string url)
+    {
+        try
+        {
+            var req = (HttpWebRequest)WebRequest.Create(url);
+            req.Timeout = 2000;
+            req.Method = "GET";
+            using (var resp = (HttpWebResponse)req.GetResponse())
+            {
+                return (int)resp.StatusCode < 400;
+            }
+        }
+        catch (WebException wex)
+        {
+            var resp = wex.Response as HttpWebResponse;
+            return resp != null && (int)resp.StatusCode == 401;
+        }
+        catch { return false; }
     }
 
     void OpenBrowser()
@@ -775,11 +838,13 @@ static class SelfTest
         // server reachability (informational; not a gate)
         try
         {
-            var req = (HttpWebRequest)WebRequest.Create("http://127.0.0.1:" + cfg.Port + "/");
-            req.Timeout = 2000;
-            using (var resp = (HttpWebResponse)req.GetResponse())
+            if (DshManager.ProbeServer("http://127.0.0.1:" + cfg.Port + "/"))
             {
-                sb.AppendLine("INFO server reachable on port " + cfg.Port + " (status " + (int)resp.StatusCode + ")");
+                sb.AppendLine("INFO server reachable on port " + cfg.Port + " (answered; 401 counts as up since dsh 0.1.5)");
+            }
+            else
+            {
+                sb.AppendLine("INFO server not reachable on port " + cfg.Port + " (expected when stopped)");
             }
         }
         catch
