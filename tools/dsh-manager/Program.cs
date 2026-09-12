@@ -471,6 +471,39 @@ public class DshManager : Form
 
     /* ---------- 流程 ---------- */
 
+    /// <summary>Stop any running instance, start the service and report readiness.</summary>
+    void RestartService(string repo)
+    {
+        SetStatus("重启服务...");
+        Log("停止现有服务...");
+        KillDsh();
+        Log("启动服务...");
+        StartAndWait(repo);
+    }
+
+    /// <summary>Start the service (assumes it is not running) and wait until it answers.</summary>
+    void StartAndWait(string repo)
+    {
+        StartService(repo);
+        bool ready = WaitForServerReady(60);
+        if (!ready && IsDshRunning())
+        {
+            Log("进程已启动但页面尚未就绪，继续等待 90 秒...");
+            SetStatus("服务启动中...", Color.FromArgb(176, 116, 0));
+            ready = WaitForServerReady(90);
+        }
+        if (ready || IsDshRunning())
+        {
+            if (ready) { Log("服务已就绪: " + BaseUrl()); SetStatus("服务运行中", Color.FromArgb(21, 115, 71)); OpenBrowser(); }
+            else { Log("启动超时：进程存活但页面未就绪，请查看日志目录"); SetStatus("启动异常", Color.Firebrick); }
+        }
+        else
+        {
+            Log("未检测到服务进程，请查看日志目录");
+            SetStatus("启动异常", Color.Firebrick);
+        }
+    }
+
     void UpdateFlow(string repo)
     {
         SetBusy(true);
@@ -481,7 +514,15 @@ public class DshManager : Form
             Log("仓库: " + repo + " 当前版本: " + ReadVersion(repo));
 
             var fr = RunCmd("git fetch origin master", repo);
-            if (fr.Code != 0) { Log("git fetch 失败（可能无网络），中止"); SetStatus("fetch 失败", Color.Firebrick); return; }
+            if (fr.Code != 0)
+            {
+                // Offline fallback: the repo usually already holds a working build,
+                // so keep this button usable without network instead of aborting.
+                Log("git fetch 失败（可能无网络），跳过更新，用本地版本启动");
+                SetStatus("跳过更新...", Color.FromArgb(176, 116, 0));
+                RestartService(repo);
+                return;
+            }
 
             var cr = RunCmd("git rev-list --count HEAD..origin/master", repo);
             int behind;
@@ -516,29 +557,7 @@ public class DshManager : Form
                 Log("已是最新版本，跳过构建");
             }
 
-            SetStatus("重启服务...");
-            Log("停止现有服务...");
-            KillDsh();
-            Log("启动服务...");
-            StartService(repo);
-
-            bool ready = WaitForServerReady(60);
-            if (!ready && IsDshRunning())
-            {
-                Log("进程已启动但页面尚未就绪，继续等待 90 秒...");
-                SetStatus("服务启动中...", Color.FromArgb(176, 116, 0));
-                ready = WaitForServerReady(90);
-            }
-            if (ready || IsDshRunning())
-            {
-                if (ready) { Log("服务已就绪: " + BaseUrl()); SetStatus("服务运行中", Color.FromArgb(21, 115, 71)); OpenBrowser(); }
-                else { Log("启动超时：进程存活但页面未就绪，请查看日志目录"); SetStatus("启动异常", Color.Firebrick); }
-            }
-            else
-            {
-                Log("未检测到服务进程，请查看日志目录");
-                SetStatus("启动异常", Color.Firebrick);
-            }
+            RestartService(repo);
         }
         catch (Exception ex)
         {
@@ -562,24 +581,7 @@ public class DshManager : Form
                 OpenBrowser();
                 return;
             }
-            StartService(repo);
-            bool ready = WaitForServerReady(60);
-            if (!ready && IsDshRunning())
-            {
-                Log("进程已启动但页面尚未就绪，继续等待 90 秒...");
-                SetStatus("服务启动中...", Color.FromArgb(176, 116, 0));
-                ready = WaitForServerReady(90);
-            }
-            if (ready || IsDshRunning())
-            {
-                if (ready) { Log("服务已就绪: " + BaseUrl()); SetStatus("服务运行中", Color.FromArgb(21, 115, 71)); OpenBrowser(); }
-                else { Log("启动超时：进程存活但页面未就绪，请查看日志目录"); SetStatus("启动异常", Color.Firebrick); }
-            }
-            else
-            {
-                Log("未检测到服务进程，请查看日志目录");
-                SetStatus("启动异常", Color.Firebrick);
-            }
+            StartAndWait(repo);
         }
         catch (Exception ex)
         {
