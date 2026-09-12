@@ -463,10 +463,38 @@ public class DshManager : Form
     {
         try
         {
-            Process.Start(BaseUrl());
-            Log("已在默认浏览器打开: " + BaseUrl());
+            // dsh 0.1.5+ protects the web UI with a startup token printed into the
+            // service log; open that URL instead of the bare one (which returns 401).
+            string url = LatestTokenUrl();
+            if (url.Length == 0) url = BaseUrl();
+            Process.Start(url);
+            Log("已在默认浏览器打开: " + url);
         }
         catch (Exception ex) { Log("打开浏览器失败: " + ex.Message); }
+    }
+
+    /// <summary>Latest `http://…/?token=…` URL the web server printed into its output log.</summary>
+    string LatestTokenUrl()
+    {
+        try
+        {
+            string outLog = Path.Combine(LogDir(), "dsh-web-out.log");
+            if (!File.Exists(outLog)) return "";
+            // Read shared: the service process keeps this file open for appending.
+            using (var sr = new StreamReader(new FileStream(outLog, FileMode.Open, FileAccess.Read, FileShare.ReadWrite), Encoding.UTF8))
+            {
+                string last = "";
+                string line;
+                while ((line = sr.ReadLine()) != null)
+                {
+                    if (line.IndexOf("/?token=", StringComparison.Ordinal) >= 0
+                        && line.IndexOf(":" + cfg.Port + "/", StringComparison.Ordinal) >= 0) last = line;
+                }
+                int s = last.IndexOf("http://", StringComparison.Ordinal);
+                return s >= 0 ? last.Substring(s).Trim() : "";
+            }
+        }
+        catch { return ""; }
     }
 
     /* ---------- 流程 ---------- */
