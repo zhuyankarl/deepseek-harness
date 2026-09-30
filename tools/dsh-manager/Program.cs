@@ -536,6 +536,126 @@ public class DshManager : Form
         catch (Exception ex) { Log("打开浏览器失败: " + ex.Message); }
     }
 
+    /* ---------- 仓库状态诊断 ---------- */
+
+    /// <summary>Git 未合并（冲突）状态码：索引中未合并条目的 porcelain 前两列。</summary>
+    internal static bool IsUnmergedStatus(string xy)
+    {
+        if (xy == null || xy.Length < 2) return false;
+        if (xy == "DD") return true;
+        char a = xy[0], b = xy[1];
+        if (a != ' ' && a != '?' && a != '!' && b != ' ' && b != '?' && b != '!') return true;
+        // AA = both added, UU = both modified (X and Y both unmerged codes).
+        return xy == "AA" || xy == "UU";
+    }
+
+    /// <summary>从 `git status --porcelain --untracked-files=no` 输出中取出未合并文件路径。</summary>
+    internal static List<string> ParseUnmerged(string porcelain)
+    {
+        var files = new List<string>();
+        if (porcelain == null) return files;
+        foreach (string raw in porcelain.Replace("\r\n", "\n").Split('\n'))
+        {
+            if (raw.Length < 4) continue;
+            string xy = raw.Substring(0, 2);
+            if (!IsUnmergedStatus(xy)) continue;
+            string path = raw.Substring(3).Trim();
+            if (path.Length >= 2 && path[0] == '"' && path[path.Length - 1] == '"') path = path.Substring(1, path.Length - 2);
+            if (path.Length > 0) files.Add(path);
+        }
+        return files;
+    }
+
+    /// <summary>运行一次 git 查询并捕获输出；超时或失败返回 null（诊断本身绝不抛异常）。</summary>
+    static RunResult GitCapture(string repo, string args, int timeoutMs)
+    {
+        try
+        {
+            var sb = new StringBuilder();
+            var psi = new ProcessStartInfo("git", args)
+            {
+                WorkingDirectory = repo,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8
+            };
+            using (var p = Process.Start(psi))
+            {
+                // 事件式读取：先读 stdout 再读 stderr 会在 stderr 写满管道时互相等待。
+                p.OutputDataReceived += delegate(object s, DataReceivedEventArgs e) { if (e.Data != null) { lock (sb) sb.AppendLine(e.Data); } };
+                p.ErrorDataReceived += delegate(object s, DataReceivedEventArgs e) { if (e.Data != null) { lock (sb) sb.AppendLine(e.Data); } };
+                p.BeginOutputReadLine();
+                p.BeginErrorReadLine();
+                if (!p.WaitForExit(timeoutMs))
+                {
+                    try { p.Kill(); } catch { }
+                    return null;
+                }
+                return new RunResult { Code = p.ExitCode, Output = sb.ToString() };
+            }
+        }
+        catch { return null; }
+    }
+
+    /// <summary>单行 git 查询；任何失败都返回空串（诊断本身绝不抛异常）。</summary>
+    static string GitLine(string repo, string args)
+    {
+        var r = GitCapture(repo, args, 8000);
+        return r == null ? "" : r.Output.Trim();
+    }
+
+    /// <summary>当前是否处于未完成的 merge / rebase / cherry-pick 中。</summary>
+    static bool MergeInProgress(string repo)
+    {
+        string gitDir = GitLine(repo, "rev-parse --git-dir");
+        if (gitDir.Length == 0) return false;
+        string baseDir = Path.IsPathRooted(gitDir)
+            ? gitDir
+            : Path.Combine(repo, gitDir);
+        foreach (string marker in new string[] { "MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD" })
+        {
+            try { if (File.Exists(Path.Combine(baseDir, marker)) || Directory.Exists(Path.Combine(baseDir, marker))) return true; }
+            catch { }
+        }
+        return false;
+    }
+
+    /// <summary>检出未合并文件并给出可执行的处置提示；返回是否应当中止更新。</summary>
+    bool PreflightRepo(string repo)
+    {
+        int n;
+        List<string> files;
+        if (!TryReadUnmerged(repo, out n, out files)) return false; // 诊断不可用时不阻断原有流程
+        if (n == 0) return false;
+
+        Log("警告：工作区存在 " + n + " 个未合并（冲突）文件，git 会拒绝任何 merge。");
+        int shown = 0;
+        foreach (string f in files)
+        {
+            if (shown >= 10) { Log("  ... 其余 " + (n - shown) + " 个见 `git status`"); break; }
+            Log("  " + f);
+            shown++;
+        }
+        Log("处置：在仓库目录执行 `git status` 查看冲突；解决后用 `git add <文件>`，再点本按钮（会自动补上 merge 提交）；");
+        Log("      若这批合并想放弃：`git merge --abort`，然后重新点本按钮。");
+        return true;
+    }
+
+    /// <summary>读取未合并文件清单；git 不可用或命令失败时返回 false（调用方按“未知”处理）。</summary>
+    internal static bool TryReadUnmerged(string repo, out int count, out List<string> files)
+    {
+        count = 0;
+        files = new List<string>();
+        var r = GitCapture(repo, "status --porcelain --untracked-files=no", 15000);
+        if (r == null || r.Code != 0) return false;
+        files = ParseUnmerged(r.Output);
+        count = files.Count;
+        return true;
+    }
+
     /// <summary>Latest `http://…/?token=…` URL the web server printed into its output log.</summary>
     string LatestTokenUrl()
     {
@@ -604,6 +724,26 @@ public class DshManager : Form
             Log("===== 更新并启动 =====");
             Log("仓库: " + repo + " 当前版本: " + ReadVersion(repo));
 
+            // 上一次 merge 留在工作区的冲突会让本次更新必然失败：先诊断并给出可执行处置。
+            if (PreflightRepo(repo))
+            {
+                Log("更新已中止：请先按上面的提示处理未合并文件");
+                SetStatus("存在冲突", Color.Firebrick);
+                return;
+            }
+
+            if (MergeInProgress(repo))
+            {
+                // 冲突已全部解决、只差 merge 提交：补上提交，本次更新即可继续。
+                Log("检测到未完成的 merge（冲突已解决但无 merge 提交），补提交后继续");
+                if (RunCmd("git commit --no-edit", repo).Code != 0)
+                {
+                    Log("merge 提交失败，中止（请手动执行 git commit 后再试）");
+                    SetStatus("merge 未完成", Color.Firebrick);
+                    return;
+                }
+            }
+
             var fr = RunCmd("git fetch origin master", repo);
             if (fr.Code != 0)
             {
@@ -629,7 +769,29 @@ public class DshManager : Form
                 {
                     Log("快进失败，尝试普通 merge");
                     if (RunCmd("git merge --no-edit FETCH_HEAD", repo).Code != 0)
-                    { Log("git merge 失败，中止"); SetStatus("merge 失败", Color.Firebrick); return; }
+                    {
+                        int uc; List<string> uf;
+                        if (TryReadUnmerged(repo, out uc, out uf) && uc > 0)
+                        {
+                            // 普通 merge 失败的最常见原因：工作区存在未合并（冲突）文件。
+                            Log("merge 失败：工作区有 " + uc + " 个未合并文件，git 拒绝合并");
+                            int shown = 0;
+                            foreach (string f in uf)
+                            {
+                                if (shown >= 10) { Log("  ... 其余 " + (uc - shown) + " 个见 `git status`"); break; }
+                                Log("  " + f);
+                                shown++;
+                            }
+                            Log("处置：解决冲突后 `git add <文件>` 再点本按钮；或 `git merge --abort` 放弃本次合并");
+                            SetStatus("存在冲突", Color.Firebrick);
+                        }
+                        else
+                        {
+                            Log("merge 失败：请查看上方 git 输出，或检查是否处于 rebase/cherry-pick 中途（`git status`）");
+                            SetStatus("merge 失败", Color.Firebrick);
+                        }
+                        return;
+                    }
                 }
                 Log("拉取完成，当前版本: " + ReadVersion(repo));
 
@@ -818,9 +980,40 @@ static class SelfTest
         Check("match: unrelated node",
             !DshManager.MatchNodeDsh(@"node server.js web"), "expected no match");
 
+        // 未合并（冲突）状态解析：决定「更新并启动」能否识别卡死的 merge
+        var unmerged = DshManager.ParseUnmerged(
+            "UU AGENTS.md\n M tools/dsh-manager/Program.cs\nA  packages/web/new.ts\nDD docs/old.md\n?? scratch.txt\nUU \"dir/with space/file.md\"\n");
+        Check("unmerged: parse",
+            unmerged.Count == 3
+            && unmerged[0] == "AGENTS.md"
+            && unmerged[1] == "docs/old.md"
+            && unmerged[2] == "dir/with space/file.md",
+            "got " + string.Join(" | ", unmerged.ToArray()));
+        Check("unmerged: clean tree", DshManager.ParseUnmerged(" M a.ts\n?? b.txt\n").Count == 0, "expected none");
+        Check("unmerged: status codes",
+            DshManager.IsUnmergedStatus("UU") && DshManager.IsUnmergedStatus("AA") && DshManager.IsUnmergedStatus("DD")
+            && DshManager.IsUnmergedStatus("AU") && !DshManager.IsUnmergedStatus(" M") && !DshManager.IsUnmergedStatus("??"),
+            "UU/AA/DD/AU unmerged; ' M'/'??' not");
+
         // repo detection
         string detected = DshManager.DetectRepo(exeDir);
         Check("repo detection", detected.Length > 0, detected.Length > 0 ? detected : "not found (set repo= in dsh-manager.ini)");
+
+        // 配置仓库的未合并文件检查：卡死的 merge 会让「更新并启动」直接失败
+        {
+            string cfgRepo = cfg.Repo.Length > 0 ? cfg.Repo : detected;
+            if (cfgRepo.Length == 0) cfgRepo = DshManager.DetectRepo(exeDir);
+            int unmergedCount; List<string> unmergedFiles;
+            if (cfgRepo.Length > 0 && DshManager.TryReadUnmerged(cfgRepo, out unmergedCount, out unmergedFiles))
+            {
+                string detail = cfgRepo + (unmergedCount > 0 ? " -> " + string.Join(", ", unmergedFiles.ToArray()) : " (no unmerged files)");
+                Check("repo merge state", unmergedCount == 0, detail);
+            }
+            else
+            {
+                sb.AppendLine("INFO repo merge state not checked (no repo configured?): " + (cfgRepo.Length > 0 ? cfgRepo : "none"));
+            }
+        }
 
         // log dir writable
         try
