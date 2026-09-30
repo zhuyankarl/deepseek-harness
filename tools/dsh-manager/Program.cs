@@ -801,7 +801,18 @@ public class DshManager : Form
 
                 SetStatus("构建 DSH...");
                 if (RunPnpm("run build", repo).Code != 0)
-                { Log("完整构建失败，中止（保留现有服务）"); SetStatus("build 失败", Color.Firebrick); return; }
+                {
+                    // 上一次构建的残留产物会让 tsc 声明生成读到已经不存在的导出
+                    // （MISSING_EXPORT / Cannot find module …/lib/…）：清干净再构建一次。
+                    Log("构建失败，清理旧产物后重试一次（历史构建残留）");
+                    SetStatus("清理并重建...");
+                    if (RunPnpm("run clean", repo).Code != 0 || RunPnpm("run build", repo).Code != 0)
+                    {
+                        Log("完整构建失败，中止（保留现有服务）");
+                        SetStatus("build 失败", Color.Firebrick);
+                        return;
+                    }
+                }
 
                 Log("构建完成");
             }
