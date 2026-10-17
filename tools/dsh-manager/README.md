@@ -10,11 +10,23 @@ The UI strings are Chinese. The repository gates do not build or test this tool;
 
 | Button | Behavior |
 |---|---|
-| 更新并启动 (Update & Start) | `git fetch origin master` → compare `HEAD..origin/master` → on updates: merge `FETCH_HEAD` into the current branch, run `pnpm install` and `pnpm run build` → stop the running service → start it → poll `http://127.0.0.1:<port>/` until it answers → open the default browser. Without updates it still restarts the service. |
-| 启动服务 (Start) | Reuse the running service and open the browser, or start it when stopped, then wait for readiness and open the browser. Never kills a running service. |
+| 更新并启动 (Update & Start) | `git fetch origin master` → compare `HEAD..origin/master` → on updates: merge `FETCH_HEAD` into the current branch, run `pnpm install`; when the package version changed, `pnpm run clean` first; then `pnpm run build` (a failed build retries once after a clean) → stop the running service → start it → poll `http://127.0.0.1:<port>/` until it answers → open the default browser. Without updates it still restarts the service. |
+| 启动服务 (Start) | Reuse the running service and open the browser, or start it when stopped, then wait for readiness and open the browser. Never kills a running service. Before starting it checks that the build artifacts exist and points at 更新并启动 instead of waiting for a server that cannot come up. |
 | 关闭服务 (Stop) | Stop the running `dsh web` processes (the `corepack pnpm dsh web` wrapper, the `node --import tsx/esm apps/cli/src/bin.ts web` server, and the `cmd.exe` wrappers that own log redirection). |
 
 Commands prefer `corepack pnpm` and fall back to a bare `pnpm` when corepack is missing; the service is started with `--no-open` so the manager alone decides when to open the browser. The service runs detached, so closing the manager does not stop it.
+
+## Command line
+
+The window is the primary entry point; three switches cover scripts and deployment checks. All of them read the same `dsh-manager.ini`.
+
+| Switch | Behavior |
+|---|---|
+| `--selftest` | Non-interactive checks; writes `selftest.log` and exits `0` only when every gate passed. |
+| `--start` | Start the service without showing the window, wait for readiness, and skip the browser step; exits `0` once `http://127.0.0.1:<port>/` answers. |
+| `--stop` | Stop the service without showing the window; exits `0` when no `dsh web` process remains. |
+
+更新并启动 has no headless switch on purpose: it can rebuild for a long time and merge conflicts still need a human decision.
 
 ## Configuration
 
@@ -37,10 +49,12 @@ Run `build.cmd` in this directory. It locates the in-box `csc.exe` and produces 
 
 ## Self-test
 
-`DSHManager.exe --selftest` runs non-interactive checks — config round-trip, tool availability (`git`, `node`, `corepack`, `csc`), process-matching patterns, repository auto-detection, log directory writability, and server reachability (informational) — and writes a report to the log directory. Exit code `0` means every gate passed.
+`DSHManager.exe --selftest` runs non-interactive checks — config round-trip, tool availability (`git`, `node`, `corepack`, `csc`), process-matching patterns, repository auto-detection, unmerged-state parsing, build-artifact detection (a fixture with and without the two markers), the configured checkout's artifact state (informational), log directory writability, and server reachability (informational) — and writes a report to the log directory. Exit code `0` means every gate passed.
 
 ## Known limitations
 
 - Process matching is heuristic: a node process whose command line contains `pnpm dsh web`, or `src/bin.ts` together with a `web` argument, is treated as the dsh web server. An unrelated tsx project launched as `src/bin.ts web` would be matched too.
 - Killing the service kills the agent sessions hosted by it; the manager deliberately does this only on 更新并启动 and 关闭服务.
 - The update flow merges `origin/master` explicitly, so it does not depend on tracking-upstream configuration for the current branch; merge conflicts still require manual resolution.
+- The build-artifact gate keys on `apps/cli/lib/bin.js` and `packages/subagent/subagent/lib/typert.host.js`; restructuring either path upstream requires updating those markers.
+- The service and the packaged desktop app share `DSH_HOME` (`~/.dsh`); starting the service while the desktop app runs logs a warning because both write session and credential storage.

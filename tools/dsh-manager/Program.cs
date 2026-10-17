@@ -22,6 +22,8 @@ public class DshManager : Form
     Button btnUpdate, btnStart, btnStop;
     Label lblStatus;
     volatile bool busy;
+    /// <summary>Set by --start / --stop: run one flow and exit without showing the window.</summary>
+    internal bool headless;
 
     /// <summary>Node command lines that identify a running dsh web server.</summary>
     static readonly Regex NodeDsh = new Regex(@"pnpm\s+dsh\s+web", RegexOptions.IgnoreCase);
@@ -39,6 +41,13 @@ public class DshManager : Form
         }
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
+        // --start / --stop：不显示窗口，跑一次流程后退出（给脚本和部署验证用）。
+        if (args.Length > 0 && (args[0] == "--start" || args[0] == "--stop"))
+        {
+            var headlessManager = new DshManager();
+            headlessManager.headless = true;
+            return headlessManager.RunHeadless(args[0] == "--stop");
+        }
         Application.Run(new DshManager());
         return 0;
     }
@@ -466,6 +475,22 @@ public class DshManager : Form
         }
     }
 
+    /// <summary>dsh web 以 tsx 启动源码，但插件加载需要构建产物；缺产物时服务必然起不来
+    /// （typert-loader: N typert contributor(s) failed to register），启动前先查两个代表产物。</summary>
+    internal static bool BuildArtifactsReady(string repo)
+    {
+        if (!IsRepoValid(repo)) return false;
+        return File.Exists(Path.Combine(repo, "apps", "cli", "lib", "bin.js"))
+            && File.Exists(Path.Combine(repo, "packages", "subagent", "subagent", "lib", "typert.host.js"));
+    }
+
+    /// <summary>桌面版 DSH 与本服务共用 DSH_HOME（~/.dsh），同时运行会争用会话与凭据存储。</summary>
+    static bool DesktopAppRunning()
+    {
+        try { return Process.GetProcessesByName("DeepSeek Harness").Length > 0; }
+        catch { return false; }
+    }
+
     void StartService(string repo)
     {
         string logDir = LogDir();
@@ -475,6 +500,7 @@ public class DshManager : Form
         // Prefer corepack; fall back to a bare pnpm. --no-open lets this manager own the browser step.
         string webArgs = "dsh web --no-open --port " + cfg.Port;
         string cmd = "(corepack pnpm " + webArgs + " || pnpm " + webArgs + ") >> \"" + outLog + "\" 2>> \"" + errLog + "\"";
+        if (DesktopAppRunning()) Log("提示：桌面版 DSH 正在运行，与本服务共用 DSH_HOME（~/.dsh），会话与凭据存储可能互相影响");
         var psi = new ProcessStartInfo("cmd.exe", "/c " + cmd)
         {
             WorkingDirectory = repo,
@@ -528,6 +554,7 @@ public class DshManager : Form
         {
             // dsh 0.1.5+ protects the web UI with a startup token printed into the
             // service log; open that URL instead of the bare one (which returns 401).
+            if (headless) { Log("无头模式：跳过打开浏览器"); return; }
             string url = LatestTokenUrl();
             if (url.Length == 0) url = BaseUrl();
             Process.Start(url);
@@ -695,6 +722,13 @@ public class DshManager : Form
     /// <summary>Start the service (assumes it is not running) and wait until it answers.</summary>
     void StartAndWait(string repo)
     {
+        if (!BuildArtifactsReady(repo))
+        {
+            Log("未检测到构建产物（apps\\cli\\lib\\bin.js 或 packages\\subagent\\subagent\\lib\\typert.host.js 缺失）");
+            Log("服务即使启动也会因 typert-loader 加载失败而起不来；请先点「更新并启动」完成构建");
+            SetStatus("未构建", Color.Firebrick);
+            return;
+        }
         StartService(repo);
         bool ready = WaitForServerReady(60);
         if (!ready && IsDshRunning())
@@ -722,7 +756,8 @@ public class DshManager : Form
         {
             if (!IsRepoValid(repo)) { Log("仓库路径无效: " + repo); SetStatus("路径错误", Color.Firebrick); return; }
             Log("===== 更新并启动 =====");
-            Log("仓库: " + repo + " 当前版本: " + ReadVersion(repo));
+            string versionBefore = ReadVersion(repo);
+            Log("仓库: " + repo + " 当前版本: " + versionBefore);
 
             // 上一次 merge 留在工作区的冲突会让本次更新必然失败：先诊断并给出可执行处置。
             if (PreflightRepo(repo))
@@ -793,12 +828,21 @@ public class DshManager : Form
                         return;
                     }
                 }
-                Log("拉取完成，当前版本: " + ReadVersion(repo));
+                string versionAfter = ReadVersion(repo);
+                Log("拉取完成，当前版本: " + versionAfter);
 
                 SetStatus("安装依赖...");
                 if (RunPnpm("install", repo).Code != 0)
                 { Log("依赖安装失败，中止"); SetStatus("install 失败", Color.Firebrick); return; }
 
+                bool versionChanged = versionBefore.Length > 0 && versionAfter.Length > 0 && versionBefore != versionAfter;
+                if (versionChanged)
+                {
+                    // 跨版本更新后旧产物会让 tsc 读到已删除的导出（MISSING_EXPORT），先清理再构建。
+                    Log("版本变化 " + versionBefore + " -> " + versionAfter + "，先清理旧构建产物");
+                    SetStatus("清理旧产物...");
+                    if (RunPnpm("run clean", repo).Code != 0) Log("clean 失败，继续构建（失败会自动重试）");
+                }
                 SetStatus("构建 DSH...");
                 if (RunPnpm("run build", repo).Code != 0)
                 {
@@ -829,6 +873,20 @@ public class DshManager : Form
             SetStatus("异常", Color.Firebrick);
         }
         finally { SetBusy(false); }
+    }
+
+    /// <summary>Run one flow without showing the window (--start / --stop).</summary>
+    internal int RunHeadless(bool stop)
+    {
+        Log("===== 无头模式: " + (stop ? "关闭服务" : "启动服务") + " =====");
+        if (stop)
+        {
+            StopFlow();
+            return IsDshRunning() ? 1 : 0;
+        }
+        string repo = (cfg.Repo.Length > 0 && IsRepoValid(cfg.Repo)) ? cfg.Repo : DetectRepo(AppDomain.CurrentDomain.BaseDirectory);
+        StartFlow(repo);
+        return ProbeServer(BaseUrl()) ? 0 : 1;
     }
 
     void StartFlow(string repo)
@@ -1037,6 +1095,32 @@ static class SelfTest
         catch
         {
             Check("log dir writable", false, logDir);
+        }
+
+        // 构建产物判定：缺产物时启动前明确提示，而不是白等 150 秒（ERR-20260913-001）
+        {
+            string artifactsFixture = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "dsh-manager-selftest-artifacts-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(System.IO.Path.Combine(artifactsFixture, "apps", "cli", "lib"));
+            File.WriteAllText(System.IO.Path.Combine(artifactsFixture, "package.json"), "{\"name\":\"@deepseek-ai/dsh-root\"}");
+            bool missingDetected = !DshManager.BuildArtifactsReady(artifactsFixture);
+            File.WriteAllText(System.IO.Path.Combine(artifactsFixture, "apps", "cli", "lib", "bin.js"), "");
+            Directory.CreateDirectory(System.IO.Path.Combine(artifactsFixture, "packages", "subagent", "subagent", "lib"));
+            File.WriteAllText(System.IO.Path.Combine(artifactsFixture, "packages", "subagent", "subagent", "lib", "typert.host.js"), "");
+            bool presentDetected = DshManager.BuildArtifactsReady(artifactsFixture);
+            Check("artifacts: detection", missingDetected && presentDetected,
+                "missing=" + missingDetected.ToString() + " present=" + presentDetected.ToString());
+            try { Directory.Delete(artifactsFixture, true); } catch { }
+        }
+
+        // 配置仓库的构建产物（仅提示：未构建时「启动服务」会被前置检查拦下）
+        {
+            string infoRepo = cfg.Repo.Length > 0 ? cfg.Repo : detected;
+            if (infoRepo.Length > 0)
+            {
+                sb.AppendLine((DshManager.BuildArtifactsReady(infoRepo)
+                    ? "INFO build artifacts present - "
+                    : "INFO build artifacts missing (run 更新并启动 first) - ") + infoRepo);
+            }
         }
 
         // server reachability (informational; not a gate)
