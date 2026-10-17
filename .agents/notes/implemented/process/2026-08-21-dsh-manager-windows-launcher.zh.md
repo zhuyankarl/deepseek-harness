@@ -10,7 +10,7 @@ Status: implemented
 
 ## 决策
 
-新增 [`tools/dsh-manager/`](../../../../tools/dsh-manager/README.md)，一个单文件 C# WinForms 启动器，使用系统自带的 .NET Framework `csc.exe` 编译——无需 SDK、无需 NuGet 包、不参与仓库构建。它提供三个操作：
+新增 [`tools/dsh-manager/`](../../../../tools/dsh-manager/README.zh.md)，一个单文件 C# WinForms 启动器，使用系统自带的 .NET Framework `csc.exe` 编译——无需 SDK、无需 NuGet 包、不参与仓库构建。它提供三个操作：
 
 - **更新并启动**：`git fetch`，与 `origin/master` 对比，有更新时依次执行 `git pull --ff-only`（失败回退 `--no-rebase`）、`corepack pnpm install`、`build:lib`、`@deepseek-ai/dsh-web-frontend` 构建，停止正在运行的服务，启动新服务，轮询 Web 端口直到可访问，然后打开默认浏览器。无更新时也会重启服务。
 - **启动**：服务已在运行则直接打开浏览器；否则启动并等待就绪。绝不会关闭正在运行的服务。

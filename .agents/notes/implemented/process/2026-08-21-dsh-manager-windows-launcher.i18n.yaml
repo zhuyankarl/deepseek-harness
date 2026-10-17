@@ -1,6 +1,19 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for 2026-08-21-dsh-manager-windows-launcher.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/process/2026-08-21-dsh-manager-windows-launcher.md
-2026-08-21-dsh-manager-windows-launcher.md: fc31c7510f2747058cc46c7a5b302f29bcf2e2d0
-2026-08-21-dsh-manager-windows-launcher.zh.md: d01d6b4008a68e3eff7cba4e88c4e4a7bbddc1c8
+/agent-note-dsh-manager-windows-desktop-launcher:
+  en: 3f62b967e9805121
+  zh: 8042c806ab75040c
+/agent-note-dsh-manager-windows-desktop-launcher/problem:
+  en: f55a6c30bb2b786c
+  zh: 110c188e45de9475
+/agent-note-dsh-manager-windows-desktop-launcher/decision:
+  en: f9c0f18aaaf80887
+  zh: 2ef0344e058af2c9
+/agent-note-dsh-manager-windows-desktop-launcher/alternatives-considered:
+  en: 8e7bd0a1cd522ae1
+  zh: deaea0a6920c506e
+/agent-note-dsh-manager-windows-desktop-launcher/consequences:
+  en: f59e39daddab12c9
+  zh: 98a430e89ee5e209
